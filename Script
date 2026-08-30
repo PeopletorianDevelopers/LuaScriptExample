@@ -1,3 +1,6 @@
+
+-- This is the main dodgeball server script.
+
 local players = game:GetService("players")
 local replicatedStorage = game:GetService("replicatedStorage")
 local serverStorage = game:GetService("serverStorage")
