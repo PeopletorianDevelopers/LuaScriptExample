@@ -1,0 +1,360 @@
+local dataStoreService = game:GetService("DataStoreService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local shopItems = ReplicatedStorage.shopItems
+
+local marketplaceService = game:GetService("MarketplaceService")
+
+local playersData = dataStoreService:GetDataStore("PlayersData")
+local playersAnimations = dataStoreService:GetDataStore("PlayersAnimations")
+local playersSkins = dataStoreService:GetDataStore("PlayersSkins")
+local playersPerks = dataStoreService:GetDataStore("PlayersPerks")
+local BadgeService = game:GetService("BadgeService")
+
+local saveTables = {
+	
+}
+
+local badgeBalls = {
+	{"permafrost", 4432679623654167},
+	{"geode", 1789335270799506},
+	{"paper", 3411776914190969}
+}
+
+local variablesSave = {
+	cash = 0,
+	volume = 0.5,
+	volume2 = 0.5,
+	viewmodel = 0,
+	fovchanges = true,
+	chargemeter = true,
+	animation = "default",
+	skin = "default",
+	perk = "doubleJump"	
+}
+
+local isSetting = {
+	volume = true,
+	volume2 = true,
+	viewmodel = true,
+	fovchanges = true,
+	chargemeter = true,
+}
+
+function hasItem(plr, item)
+	local ty = item.Parent.Name
+	
+	if ty == "animations" then
+		if plr.animations:FindFirstChild(item.Name) then
+			return true
+		end
+	elseif ty == "skins" then
+		if plr.skins:FindFirstChild(item.Name) then
+			return true
+		end
+	elseif ty == "perks" then
+		if plr.perks:FindFirstChild(item.Name) then
+			return true
+		end
+	end
+	
+	return false
+end
+
+function equipItem(plr, item)
+	local ty = item.Parent.Name
+	
+	if ty == "animations" then
+		plr.stats.animation.Value = item.Name
+	elseif ty == "skins" then
+		plr.stats.skin.Value = item.Name
+	elseif ty == "perks" then
+		plr.stats.perk.Value = item.Name
+	end
+end
+
+function buyItem(plr, item)
+	if item:HasTag("unbuyable") then
+		return "no"
+	end
+	
+	if item:GetAttribute("variant") then
+		local mainVariant = item.Parent:FindFirstChild(item:GetAttribute("variant"))
+		
+		if mainVariant and mainVariant:HasTag("unbuyable") and not hasItem(plr, mainVariant) then
+			return "no"
+		end
+	end
+	
+	local ty = item.Parent.Name
+	
+	if ty == "animations" then
+		local animation = Instance.new("StringValue", plr.animations)
+		animation.Name = item.Name
+
+		plr.stats.animation.Value = item.Name
+
+		return "bought"
+	elseif ty == "skins" then
+		local skin = Instance.new("StringValue", plr.skins)
+		skin.Name = item.Name
+
+		plr.stats.skin.Value = item.Name
+
+		return "bought"
+	elseif ty == "perks" then
+		local perk = Instance.new("StringValue", plr.perks)
+		perk.Name = item.Name
+
+		plr.stats.perk.Value = item.Name
+
+		return "bought"
+	end
+end
+
+game.Players.CharacterAutoLoads = false
+
+game.Players.PlayerAdded:Connect(function(plr)
+	plr:AddTag("menu")
+	plr:SetAttribute("currentLoads", 0)
+	
+	local menuGUI = script.MenuGUI:Clone()
+	menuGUI.Parent = plr.PlayerGui
+	menuGUI.Enabled = true
+	
+	plr.CharacterAdded:Connect(function(char)
+		plr:SetAttribute("currentLoads", plr:GetAttribute("currentLoads") + 1)
+		local humanoid = char:WaitForChild("Humanoid")
+
+		humanoid.Died:Connect(function()
+			local loads = plr:GetAttribute("currentLoads")
+			task.wait(3)
+			if loads == plr:GetAttribute("currentLoads") and not plr:GetAttribute("roundEliminated") then
+				plr:LoadCharacterAsync()
+			end
+		end)
+	end)
+	
+	local pstats = Instance.new("Folder", plr)
+	pstats.Name = "stats"
+	
+	for i, v in pairs(variablesSave) do
+		local var = nil
+		
+		if typeof(v) == "boolean" then
+			var = Instance.new("BoolValue", pstats)
+		elseif typeof(v) == "number" then
+			var = Instance.new("NumberValue", pstats)
+		elseif typeof(v) == "string" then
+			var = Instance.new("StringValue", pstats)
+		end
+		
+		var.Name = i
+		var.Value = v
+	end
+	
+	local data = playersData:GetAsync(plr.UserId)
+	
+	if data then
+		for i, v in pairs(data) do
+			if not pstats:FindFirstChild(i) then
+				warn("Variable "..i.." not found")
+				continue
+			end
+			if typeof(v) ~= typeof(pstats[i].Value) then
+				warn("Data type for "..i.." is not correct")
+				continue
+			else
+				pstats[i].Value = v
+			end
+		end
+	end
+	
+	local animations = Instance.new("Folder")
+	animations.Name = "animations"
+	animations.Parent = plr
+	
+	local data2 = playersAnimations:GetAsync(plr.UserId)
+	
+	if data2 then
+		for i, v in pairs(data2) do
+			local animation = Instance.new("StringValue", animations)
+			animation.Name = v
+		end
+	else
+		local defaultAnimation = Instance.new("StringValue", animations)
+		defaultAnimation.Name = "default"
+	end
+	
+	local skins = Instance.new("Folder")
+	skins.Name = "skins"
+	skins.Parent = plr
+
+	local data3 = playersSkins:GetAsync(plr.UserId)
+
+	if data3 then
+		for i, v in pairs(data3) do
+			local skin = Instance.new("StringValue", skins)
+			skin.Name = v
+		end
+		
+		for i, v in pairs(badgeBalls) do
+			if not skins:FindFirstChild(v[1]) and BadgeService:UserHasBadgeAsync(plr.UserId, v[2]) then
+				local skin = Instance.new("StringValue", skins)
+				skin.Name = v[1]
+			end
+		end
+	else
+		if plr.UserId == 93260274 then
+			local defaultSkin = Instance.new("StringValue", skins)
+			defaultSkin.Name = "default"
+			local defaultSkin = Instance.new("StringValue", skins)
+			defaultSkin.Name = "chum"
+		else
+			local defaultSkin = Instance.new("StringValue", skins)
+			defaultSkin.Name = "default"
+		end
+		
+	end
+	
+	local perks = Instance.new("Folder")
+	perks.Name = "perks"
+	perks.Parent = plr
+
+	local data4 = playersPerks:GetAsync(plr.UserId)
+
+	if data4 then
+		for i, v in pairs(data4) do
+			local skin = Instance.new("StringValue", perks)
+			skin.Name = v
+		end
+	else
+		local defaultPerk = Instance.new("StringValue", perks)
+		defaultPerk.Name = "doubleJump"
+	end
+end)
+
+game.Players.PlayerRemoving:Connect(function(plr)
+	local data = {}
+	
+	for i, v in pairs(plr.stats:GetChildren()) do
+		data[v.Name] = v.Value
+	end
+	
+	playersData:SetAsync(plr.UserId, data)
+	
+	local data2 = {}
+	
+	for i, v in pairs(plr.animations:GetChildren()) do
+		data2[i] = v.Name
+	end
+	
+	playersAnimations:SetAsync(plr.UserId, data2)
+	
+	local data3 = {}
+
+	for i, v in pairs(plr.skins:GetChildren()) do
+		data3[i] = v.Name
+	end
+
+	playersSkins:SetAsync(plr.UserId, data3)
+	
+	local data4 = {}
+
+	for i, v in pairs(plr.perks:GetChildren()) do
+		data4[i] = v.Name
+	end
+
+	playersPerks:SetAsync(plr.UserId, data4)
+end)
+
+ReplicatedStorage.changeSetting.OnServerInvoke = function(plr, settingName, variable)
+	local setting = plr.stats:FindFirstChild(settingName)
+	
+	if setting and isSetting[settingName] then
+		setting.Value = variable
+		return true
+	else
+		return false
+	end
+end
+
+ReplicatedStorage.join.OnServerInvoke = function(plr, joinStatus)
+	if joinStatus == "join" and plr:HasTag("menu") then
+		plr:RemoveTag("menu")
+		plr:LoadCharacterAsync()
+		return true
+	elseif joinStatus == "leave" and not plr:HasTag("menu") then
+		plr:AddTag("menu")
+		plr.score.Value = 0
+		plr.hits.Value = 0
+		if plr.Character then
+			plr.Character:Destroy()
+		end
+		return true
+	end
+end
+
+ReplicatedStorage.buy.OnServerInvoke = function(plr, productId)
+	if productId == 3611110067 or productId == 3611110229 or productId == 3611206151 then
+		marketplaceService:PromptProductPurchase(plr, productId)
+		plr:AddTag("unfinished")
+		
+		repeat wait() until not plr:HasTag("unfinished")
+		
+		if plr:HasTag("buy") then
+			plr:RemoveTag("buy")
+			return true
+		else
+			return false
+		end
+	end
+end
+
+ReplicatedStorage.shop.OnServerInvoke = function(plr, item)
+	if hasItem(plr, item) then
+		equipItem(plr, item)
+		return "equipped"
+	else
+		local cost = item:GetAttribute("cost")
+
+		if plr.stats.cash.Value >= cost and not item:HasTag("unbuyable") then
+			plr.stats.cash.Value -= cost
+
+			return buyItem(plr, item)
+		else
+			if item:HasTag("unbuyable") then
+				return "no"
+			else
+				return "poor"
+			end
+		end
+	end
+end
+
+marketplaceService.PromptProductPurchaseFinished:Connect(function(userId, productId, isPurchased)
+	local plr = nil
+
+	for i, v in pairs(game.Players:GetPlayers()) do
+		if v.UserId == userId then
+			plr = v
+			break
+		end
+	end
+
+	if not plr then
+		return
+	end
+	
+	plr:RemoveTag("unfinished")
+	if isPurchased then
+		plr:AddTag("buy")
+		if productId == 3611110067 then
+			plr.stats.cash.Value += 500
+		elseif productId == 3611110229 then
+			plr.stats.cash.Value += 1000
+		elseif productId == 3611206151 then
+			plr.stats.cash.Value += 2500
+		end
+	end
+end)
