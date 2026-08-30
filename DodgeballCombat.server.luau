@@ -1,29 +1,35 @@
+-- Connected Discord-GitHub
+-- @snoozymelly
 
--- This is the main dodgeball server script.
+-- Services used by the server-side dodgeball system.
+-- The server owns damage, pickup validation, projectile hit checks, and shared effects so clients cannot decide combat results.
+local players = game:GetService("Players")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local serverStorage = game:GetService("ServerStorage")
+local runService = game:GetService("RunService")
+local tweenService = game:GetService("TweenService")
+local debris = game:GetService("Debris")
 
-local players = game:GetService("players")
-local replicatedStorage = game:GetService("replicatedStorage")
-local serverStorage = game:GetService("serverStorage")
-local runService = game:GetService("runService")
-local tweenService = game:GetService("tweenService")
-local debris = game:GetService("debris")
+-- This script runs inside one character and keeps references to the character state used by the throw system.
 local character = script.Parent
 local humanoid: Humanoid = character:WaitForChild("Humanoid")
 local rootPart = character:WaitForChild("HumanoidRootPart")
 local ballsFolder = workspace:WaitForChild("Balls")
-local applyBallSkin = require(replicatedStorage.applyBallSkin)
+local applyBallSkin = require(replicatedStorage.ApplyBallSkin)
 local plr = players:GetPlayerFromCharacter(character)
 local animationName = plr.stats:WaitForChild("animation")
 local perk = plr.stats.perk.Value
 local overcharge = perk == "overcharge"
 local animations = replicatedStorage.shopItems.animations
+
+-- The selected animation pack can provide ball-specific animation assets. Cloning them into this script keeps the active character setup self-contained.
 local animationPack = animations:FindFirstChild(animationName.Value)
 if animationPack then
 	for i, v in pairs(animationPack.ball:GetChildren()) do
 		v:Clone().Parent = script
 	end
 end
-local ragdoll = require(replicatedStorage.ragdoll)
+local ragdoll = require(replicatedStorage.Ragdoll)
 local oldFightEvent = character:FindFirstChild("FightEvent")
 if oldFightEvent then
 	oldFightEvent:Destroy()
@@ -32,14 +38,18 @@ local speedTag = Instance.new("NumberValue")
 speedTag.Parent = character
 speedTag.Value = 30
 speedTag.Name = "speedTag"
+
+-- FightEvent receives pickup/charge/throw requests from this character's client.
+-- Each request is checked against the sender's character before gameplay state is changed.
 local remote = Instance.new("RemoteEvent")
 remote.Name = "FightEvent"
 remote.Parent = character
 local getMouse = Instance.new("RemoteFunction")
 getMouse.Name = "MouseRemote"
 getMouse.Parent = character
-local chargeMeterEvent =
-	replicatedStorage:FindFirstChild("ChargeMeterEvent")
+
+-- ChargeMeterEvent only sends visual charge state to the client; the actual charge value remains authoritative on the server.
+local chargeMeterEvent = replicatedStorage:FindFirstChild("ChargeMeterEvent")
 if not chargeMeterEvent then
 	chargeMeterEvent = Instance.new("RemoteEvent")
 	chargeMeterEvent.Name = "ChargeMeterEvent"
@@ -53,18 +63,10 @@ if not animator then
 	animator = Instance.new("Animator")
 	animator.Parent = humanoid
 end
-local hold = animator:LoadAnimation(
-	script:WaitForChild("HoldAnim")
-)
-local charge = animator:LoadAnimation(
-	script:WaitForChild("ChargeAnim")
-)
-local throw = animator:LoadAnimation(
-	script:WaitForChild("ThrowAnim")
-)
-local overchargeAnim = animator:LoadAnimation(
-	script:WaitForChild("overcharge")
-)
+local hold = animator:LoadAnimation(script:WaitForChild("HoldAnim"))
+local charge = animator:LoadAnimation(script:WaitForChild("ChargeAnim"))
+local throw = animator:LoadAnimation(script:WaitForChild("ThrowAnim"))
+local overchargeAnim = animator:LoadAnimation(script:WaitForChild("overcharge"))
 hold.Priority = Enum.AnimationPriority.Action2
 charge.Priority = Enum.AnimationPriority.Action2
 throw.Priority = Enum.AnimationPriority.Action2
@@ -103,6 +105,8 @@ local maximumPlayerDamage = 55
 local minimumNpcDamage = 25
 local maximumNpcDamage = 75
 local impactEffectLifetime = 2
+
+-- Projectile star effects are made non-collidable and massless so visual parts cannot alter the ball's physics.
 local function prepareStarPart(starPart)
 	starPart.Anchored = false
 	starPart.CanCollide = false
@@ -110,6 +114,8 @@ local function prepareStarPart(starPart)
 	starPart.CanQuery = false
 	starPart.Massless = true
 end
+
+-- Select a shot effect from the final charge amount. Higher charge levels receive stronger visual feedback without changing hit logic.
 local function spawnShotStar(ball, throwCharge)
 	if not ball then
 		return nil
@@ -193,6 +199,8 @@ local function getHeldBall()
 	end
 	return nil
 end
+
+-- Meter updates are ignored until the client reports that its UI is ready, preventing early RemoteEvent calls from being lost.
 local function sendMeter(player, action, value)
 	if not meterClientReady then
 		return
@@ -200,90 +208,38 @@ local function sendMeter(player, action, value)
 	if not player or player.Parent ~= players then
 		return
 	end
-	chargeMeterEvent:FireClient(
-		player,
-		action,
-		value
-	)
+	chargeMeterEvent:FireClient(player, action, value)
 end
-chargeMeterEvent.OnServerEvent:Connect(function(player, action)
-	if player.Character ~= character then
-		return
-	end
-	if action == "Ready" then
-		meterClientReady = true
-		chargeMeterEvent:FireClient(player, "ReadyAck", true)
-		if charging then
-			chargeMeterEvent:FireClient(player, "Start", holdCharge)
-			chargeMeterEvent:FireClient(player, "Update", holdCharge)
-		end
-	end
-end)
+chargeMeterEvent.OnServerEvent:Connect(function(player, action) if player.Character ~= character then return end if action == "Ready" then meterClientReady = true chargeMeterEvent:FireClient(player, "ReadyAck", true) if charging then chargeMeterEvent:FireClient(player, "Start", holdCharge) chargeMeterEvent:FireClient(player, "Update", holdCharge) end end end)
+
+-- Effects can contain different Roblox object types, so this gathers the numeric properties that can be tweened in a common format.
 local function collectFadeObjects(container)
 	local objects = {}
 	for _, object in ipairs(container:GetDescendants()) do
 		if object:IsA("ParticleEmitter") then
-			table.insert(objects, {
-				object = object,
-				property = "Rate",
-				value = object.Rate
-			})
+			table.insert(objects, {object = object, property = "Rate", value = object.Rate})
 		elseif object:IsA("Fire") then
-			table.insert(objects, {
-				object = object,
-				property = "Size",
-				value = object.Size
-			})
-			table.insert(objects, {
-				object = object,
-				property = "Heat",
-				value = object.Heat
-			})
-		elseif object:IsA("PointLight")
-			or object:IsA("SpotLight")
-			or object:IsA("SurfaceLight") then
-			table.insert(objects, {
-				object = object,
-				property = "Brightness",
-				value = object.Brightness
-			})
+			table.insert(objects, {object = object, property = "Size", value = object.Size})
+			table.insert(objects, {object = object, property = "Heat", value = object.Heat})
+		elseif object:IsA("PointLight") or object:IsA("SpotLight") or object:IsA("SurfaceLight") then
+			table.insert(objects, {object = object, property = "Brightness", value = object.Brightness})
 		end
 	end
 	if container:IsA("ParticleEmitter") then
-		table.insert(objects, {
-			object = container,
-			property = "Rate",
-			value = container.Rate
-		})
+		table.insert(objects, {object = container, property = "Rate", value = container.Rate})
 	elseif container:IsA("Fire") then
-		table.insert(objects, {
-			object = container,
-			property = "Size",
-			value = container.Size
-		})
-		table.insert(objects, {
-			object = container,
-			property = "Heat",
-			value = container.Heat
-		})
+		table.insert(objects, {object = container, property = "Size", value = container.Size})
+		table.insert(objects, {object = container, property = "Heat", value = container.Heat})
 	end
 	return objects
 end
+
+-- TweenService fades particle/light intensity instead of enabling effects abruptly.
 local function fadeEffectIn(container, duration)
 	local objects = collectFadeObjects(container)
 	for _, data in ipairs(objects) do
 		data.object[data.property] = 0
-		tweenService:Create(
-			data.object,
-			TweenInfo.new(
-				duration,
-				Enum.EasingStyle.Quad,
-				Enum.EasingDirection.Out
-			),
-			{
-				[data.property] = data.value
-			}
-		):Play()
+		tweenService:Create(data.object, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {[data.property] = data.value}):Play()
 	end
 end
 local function fadeEffectOut(container, duration)
@@ -291,23 +247,9 @@ local function fadeEffectOut(container, duration)
 		return
 	end
 	for _, data in ipairs(collectFadeObjects(container)) do
-		tweenService:Create(
-			data.object,
-			TweenInfo.new(
-				duration,
-				Enum.EasingStyle.Quad,
-				Enum.EasingDirection.In
-			),
-			{
-				[data.property] = 0
-			}
-		):Play()
+		tweenService:Create(data.object, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {[data.property] = 0}):Play()
 	end
-	task.delay(duration, function()
-		if container and container.Parent then
-			container:Destroy()
-		end
-	end)
+	task.delay(duration, function() if container and container.Parent then container:Destroy() end end)
 end
 local function removeRedFire(ball)
 	if not ball then
@@ -338,8 +280,7 @@ local function addRedFire(ball)
 	if ball:FindFirstChild("ChargeFire") then
 		return
 	end
-	local fireTemplate =
-		replicatedStorage:FindFirstChild("Fire")
+	local fireTemplate = replicatedStorage:FindFirstChild("Fire")
 	if not fireTemplate then
 		warn("Fire is missing from replicatedStorage")
 		return
@@ -356,8 +297,7 @@ local function addBlueFire(ball)
 	if ball:FindFirstChild("BlueChargeFire") then
 		return
 	end
-	local blueFireTemplate =
-		replicatedStorage:FindFirstChild("BlueFire")
+	local blueFireTemplate = replicatedStorage:FindFirstChild("BlueFire")
 	if not blueFireTemplate then
 		warn("BlueFire is missing from replicatedStorage")
 		return
@@ -371,6 +311,8 @@ local function addBlueFire(ball)
 		fadeEffectOut(redFire, 0.35)
 	end
 end
+
+-- Reset all server charge state together so interrupted throws cannot leave stale charge values or effects behind.
 local function resetCharging(player, removeFire)
 	charging = false
 	holdCharge = 0
@@ -383,12 +325,13 @@ local function resetCharging(player, removeFire)
 		removeAllChargeFire(getHeldBall())
 	end
 end
+
+-- Releasing restores the ball to Workspace, removes its hand weld, and marks it as available for another pickup.
 local function releaseBall(ball)
 	if not ball then
 		return
 	end
-	local ballWeld = ball:FindFirstChild("BallWeld")
-		or ball:FindFirstChildOfClass("WeldConstraint")
+	local ballWeld = ball:FindFirstChild("BallWeld") or ball:FindFirstChildOfClass("WeldConstraint")
 	if ballWeld then
 		ballWeld:Destroy()
 	end
@@ -401,16 +344,11 @@ local function releaseBall(ball)
 		throwable.Value = true
 	end
 end
-humanoid.Died:Connect(function()
-	local player = getOwner()
-	local ball = getHeldBall()
-	if ball then
-		removeAllChargeFire(ball)
-		releaseBall(ball)
-	end
-	resetCharging(player, false)
-end)
+humanoid.Died:Connect(function() local player = getOwner() local ball = getHeldBall() if ball then removeAllChargeFire(ball) releaseBall(ball) end resetCharging(player, false) end)
 local chargeRequestId = 0
+
+-- Charging only begins while the character is alive and actually owns a held ball.
+-- os.clock() is used for elapsed-time checks while Heartbeat handles frame-rate-independent charge growth.
 local function beginCharging(player)
 	if charging or humanoid.Health <= 0 then
 		return false
@@ -433,25 +371,16 @@ local function beginCharging(player)
 	charge:Play()
 	return true
 end
+
+-- Pickup and charge requests can arrive on adjacent frames. A short retry window avoids dropping valid input while still expiring stale requests.
 local function queueChargeUntilBallIsHeld(player)
 	chargeRequestId += 1
 	local thisRequestId = chargeRequestId
-	task.spawn(function()
-		local deadline = os.clock() + 0.75
-		repeat
-			if thisRequestId ~= chargeRequestId then
-				return
-			end
-			if player.Character ~= character or humanoid.Health <= 0 then
-				return
-			end
-			if beginCharging(player) then
-				return
-			end
-			task.wait()
-		until os.clock() >= deadline
-	end)
+	task.spawn(function() local deadline = os.clock() + 0.75 repeat if thisRequestId ~= chargeRequestId then return end if player.Character ~= character or humanoid.Health <= 0 then return end if beginCharging(player) then return end task.wait() until os.clock() >= deadline end)
 end
+
+-- Throw strength is derived from the server's charge state, then mapped into projectile speed and damage.
+-- The client only supplies an aim CFrame; typeof() rejects invalid aim data before it is used.
 local function throwBall(player, val1, ve)
 	chargeRequestId += 1
 	local ball = getHeldBall()
@@ -463,21 +392,21 @@ local function throwBall(player, val1, ve)
 		return
 	end
 	local mul = (overcharge and 5 or 4) / 4
-	local mul2 = 4/(overcharge and 5 or 4)
+	local mul2 = 4 / (overcharge and 5 or 4)
 	local throwCharge = math.clamp(holdCharge * mul, 0, 1 * mul)
 	charging = false
 	sendMeter(player, "Stop", 0)
 	hold:Stop()
 	charge:Stop()
 	throw:Play()
-	if throwCharge >= 0.5*mul2 then
+	if throwCharge >= 0.5 * mul2 then
 		powerShotSound:Play()
 		local fovTag = Instance.new("NumberValue")
 		fovTag.Name = "fovTag"
 		fovTag.Value = 60
 		fovTag.Parent = character
-		chargeSlowdown = throwCharge*0.5
-		debris:AddItem(fovTag, throwCharge*0.5)
+		chargeSlowdown = throwCharge * 0.5
+		debris:AddItem(fovTag, throwCharge * 0.5)
 	else
 		shotSound:Play()
 	end
@@ -485,45 +414,41 @@ local function throwBall(player, val1, ve)
 		ball.throwSound:Play()
 	end
 	ball.Parent = ballsFolder
-	local ballWeld = ball:FindFirstChild("BallWeld")
-		or ball:FindFirstChildOfClass("WeldConstraint")
+	local ballWeld = ball:FindFirstChild("BallWeld") or ball:FindFirstChildOfClass("WeldConstraint")
 	if ballWeld then
 		ballWeld:Destroy()
 	end
 	ball.CanCollide = true
 	ball.CanTouch = true
 	ball.CanQuery = true
-	ball.Position = rootPart.Position
-		+ Vector3.new(0, 0.5, 0)
+	ball.Position = rootPart.Position + Vector3.new(0, 0.5, 0)
 	if ball:FindFirstChild("skin") then
 		ball.skin:PivotTo(ball.CFrame)
 	end
 	local shotStar = spawnShotStar(ball, throwCharge)
-	local throwSpeed = minimumThrowSpeed
-		+ ((maximumThrowSpeed - minimumThrowSpeed) * throwCharge)
+	local throwSpeed = minimumThrowSpeed + ((maximumThrowSpeed - minimumThrowSpeed) * throwCharge)
 	ball.CanCollide = false
+
+-- BodyVelocity gives the ball its initial travel speed. Network ownership is then assigned to the thrower for smooth normal projectile motion.
 	local velocity = Instance.new("BodyVelocity")
 	velocity.Name = "ThrowVelocity"
 	velocity.Velocity = val1.LookVector * throwSpeed
 	velocity.MaxForce = Vector3.new(100000, 100000, 100000)
 	velocity.P = 100000
 	velocity.Parent = ball
-	pcall(function()
-		ball:SetNetworkOwner(player)
-	end)
+	pcall(function() ball:SetNetworkOwner(player) end)
+
+-- Temporary NoCollisionConstraints prevent the freshly thrown ball from colliding with the thrower's own character.
 	local noCollisionConstraints = {}
+
+-- Character descendants use the Player collision group. Accessory/attached parts are non-physical so they do not interfere with ball collision.
 	for _, object in ipairs(character:GetDescendants()) do
-		if object:IsA("BasePart")
-			and object.CanCollide then
-			local constraint =
-				Instance.new("NoCollisionConstraint")
+		if object:IsA("BasePart") and object.CanCollide then
+			local constraint = Instance.new("NoCollisionConstraint")
 			constraint.Part0 = object
 			constraint.Part1 = ball
 			constraint.Parent = object
-			table.insert(
-				noCollisionConstraints,
-				constraint
-			)
+			table.insert(noCollisionConstraints, constraint)
 		end
 	end
 	ball.CanCollide = true
@@ -535,17 +460,8 @@ local function throwBall(player, val1, ve)
 	blueFireAdded = false
 	local hitInstance = nil
 	local throwStarted = os.clock()
-	local touchConnection = ball.Touched:Connect(function(touchedPart)
-		if touchedPart:IsDescendantOf(character)
-			or touchedPart:IsDescendantOf(ballsFolder)
-			or touchedPart == ball then
-			return
-		end
-		if touchedPart.CanQuery then
-			hitInstance = touchedPart
-		end
-	end)
-	ball.Size = Vector3.new(1.6,1.6,1.6)
+	local touchConnection = ball.Touched:Connect(function(touchedPart) if touchedPart:IsDescendantOf(character) or touchedPart:IsDescendantOf(ballsFolder) or touchedPart == ball then return end if touchedPart.CanQuery then hitInstance = touchedPart end end)
+	ball.Size = Vector3.new(1.6, 1.6, 1.6)
 	repeat
 		local movement = ball.AssemblyLinearVelocity * 0.06
 		if movement.Magnitude < 0.01 then
@@ -553,45 +469,36 @@ local function throwBall(player, val1, ve)
 		end
 		local rayParams = RaycastParams.new()
 		rayParams.FilterType = Enum.RaycastFilterType.Exclude
-		rayParams.FilterDescendantsInstances = {
-			character,
-			ball,
-			ballsFolder
-		}
-		local result = workspace:Spherecast(
-			ball.Position,
-			overcharge and throwCharge >= 1.23 and 0.5 or 1.1,
-			movement,
-			rayParams
-		)
+		rayParams.FilterDescendantsInstances = {character, ball, ballsFolder}
+		local result = workspace:Spherecast(ball.Position, overcharge and throwCharge >= 1.23 and 0.5 or 1.1, movement, rayParams)
 		if result then
 			hitInstance = result.Instance
 		end
 		task.wait()
-	until hitInstance
-		or os.clock() - throwStarted >= 5
-		or not ball.Parent
+	until hitInstance or os.clock() - throwStarted >= 5 or not ball.Parent
 	if not ball.Parent then
 		if shotStar and shotStar.Parent then
 			shotStar:Destroy()
 		end
 		return
 	end
-	ball.Size = Vector3.new(2,2,2)
+	ball.Size = Vector3.new(2, 2, 2)
 	if shotStar and shotStar.Parent then
 		shotStar:Destroy()
 		shotStar = nil
 	end
-	for _, constraint in ipairs(
-		noCollisionConstraints
-		) do
+	for _, constraint in ipairs(noCollisionConstraints) do
 		constraint:Destroy()
 	end
 	ball.CanCollide = true
 	local hit = script:WaitForChild("Hit"):Clone()
+
+-- Damage scales linearly with charge. Player hits can also gain capped distance damage, rewarding accurate long-range throws.
 	local playerDamage = minimumPlayerDamage + ((maximumPlayerDamage - minimumPlayerDamage) * throwCharge)
 	local npcDamage = minimumNpcDamage + ((maximumNpcDamage - minimumNpcDamage) * throwCharge)
 	if hitInstance then
+
+-- Tagged world objects can react to dodgeballs through a BindableEvent without coupling their implementation to this combat script.
 		if hitInstance:HasTag("hittable") then
 			local hitEvent = hitInstance:FindFirstChildOfClass("BindableEvent")
 			if hitEvent then
@@ -600,148 +507,100 @@ local function throwBall(player, val1, ve)
 				end
 			end
 		end
-		local hitCharacter =
-			hitInstance:FindFirstAncestorOfClass("Model")
-		local hitHumanoid = hitCharacter
-			and hitCharacter:FindFirstChildOfClass(
-				"Humanoid"
-			)
-		if hitHumanoid
-			and hitCharacter ~= character then
-			if throwCharge >= 0.5 and not godThrow and not aimbotThrow then
-				local critical =
-					script:WaitForChild("Critical"):Clone()
+		local hitCharacter = hitInstance:FindFirstAncestorOfClass("Model")
+		local hitHumanoid = hitCharacter and hitCharacter:FindFirstChildOfClass("Humanoid")
+		if hitHumanoid and hitCharacter ~= character then
+
+-- Strong throws apply short knockback and ragdoll feedback before normal player/NPC damage is processed.
+			if throwCharge >= 0.5 then
+				local critical = script:WaitForChild("Critical"):Clone()
 				critical.Parent = ball
 				critical:Play()
 				local hitHrp = hitCharacter:FindFirstChild("HumanoidRootPart")
 				if hitHrp then
 					local velocity = Instance.new("BodyVelocity")
-					velocity.Velocity = ball.AssemblyLinearVelocity.Unit*(80+40*throwCharge) + Vector3.new(0,40,0)
-					velocity.MaxForce = Vector3.new(1,1,1) * 10000
+					velocity.Velocity = ball.AssemblyLinearVelocity.Unit * (80 + 40 * throwCharge) + Vector3.new(0, 40, 0)
+					velocity.MaxForce = Vector3.new(1, 1, 1) * 10000
 					velocity.P = 10000
 					velocity.Parent = hitHrp
 					debris:AddItem(velocity, 0.12)
 				end
 				task.defer(function()
-					ragdoll.ragdoll(hitCharacter, 0.5)
+					ragdoll.Ragdoll(hitCharacter, 0.5)
 				end)
 				debris:AddItem(critical, 3)
 			end
 			if hitCharacter:GetAttribute("vulnerable") then
 				task.defer(function()
 					hitCharacter:SetAttribute("cancel", true)
-					ragdoll.ragdoll(hitCharacter, 1.5)
+					ragdoll.Ragdoll(hitCharacter, 1.5)
 				end)
 			end
-			local hitPlayer =
-				players:GetPlayerFromCharacter(
-					hitCharacter
-				)
-			local throwDistance = (
-				rootPart.Position - ball.Position
-			).Magnitude
+			local hitPlayer = players:GetPlayerFromCharacter(hitCharacter)
+			local throwDistance = (rootPart.Position - ball.Position).Magnitude
 			if hitPlayer then
-				local pvp =
-					workspace:FindFirstChild("pvp")
+
+-- Player damage is gated by the server PvP value; NPC damage remains available outside PvP rounds.
+				local pvp = workspace:FindFirstChild("pvp")
 				if pvp and pvp.Value then
-					local distanceDamage = math.clamp(
-						math.round(
-							throwDistance * 0.75
-						),
-						0,
-						40
-					)
-					hitHumanoid:TakeDamage(
-						(overcharge and throwCharge >= 1.25) and
-							9999
-							or
-							math.round(
-								playerDamage
-								+ distanceDamage
-							)
-					)
+					local distanceDamage = math.clamp(math.round(throwDistance * 0.75), 0, 40)
+					hitHumanoid:TakeDamage((overcharge and throwCharge >= 1.25) and 9999 or math.round(playerDamage + distanceDamage))
 					hit:Play()
-					local hits =
-						player:FindFirstChild("hits")
-					local score =
-						player:FindFirstChild("score")
+					local hits = player:FindFirstChild("hits")
+					local score = player:FindFirstChild("score")
 					if hits then
 						hits.Value += 1
 					end
 					if score and hitPlayer then
-						score.Value += math.round(
-							throwDistance / 2
-						)
+						score.Value += math.round(throwDistance / 2)
 					end
-					local oldKillTag =
-						hitCharacter:FindFirstChild(
-							"killTag"
-						)
+					local oldKillTag = hitCharacter:FindFirstChild("killTag")
 					if oldKillTag then
 						oldKillTag:Destroy()
 					end
-					local killTag =
-						Instance.new("ObjectValue")
+					local killTag = Instance.new("ObjectValue")
 					killTag.Name = "killTag"
 					killTag.Value = player
 					killTag.Parent = hitCharacter
 					debris:AddItem(killTag, 3)
-					local hitEvent =
-						replicatedStorage:FindFirstChild(
-							"HitEvent"
-						)
+					local hitEvent = replicatedStorage:FindFirstChild("HitEvent")
 					if hitEvent then
 						hitEvent:FireClient(player)
 					end
 				end
 			else
-				hitHumanoid:TakeDamage(
-					(overcharge and throwCharge >= 1.25) and
-						9999
-						or
-						math.round(npcDamage)
-				)
+				hitHumanoid:TakeDamage((overcharge and throwCharge >= 1.25) and 9999 or math.round(npcDamage))
 				hit:Play()
-				local hits =
-					player:FindFirstChild("hits")
-				local score =
-					player:FindFirstChild("score")
+				local hits = player:FindFirstChild("hits")
+				local score = player:FindFirstChild("score")
 				if hits then
 					hits.Value += 1
 				end
 				if score then
-					score.Value += math.round(
-						throwDistance / 2
-					)
+					score.Value += math.round(throwDistance / 2)
 				end
-				local hitEvent =
-					replicatedStorage:FindFirstChild(
-						"HitEvent"
-					)
+				local hitEvent = replicatedStorage:FindFirstChild("HitEvent")
 				if hitEvent then
 					hitEvent:FireClient(player)
 				end
 			end
 		end
 	end
-	local particleTemplate =
-		serverStorage:FindFirstChild("Particle")
+
+-- Impact particles are chosen from charge thresholds so effects match the strength of the server-confirmed hit.
+	local particleTemplate = serverStorage:FindFirstChild("Particle")
 	if particleTemplate then
 		local particle = particleTemplate:Clone()
 		particle.Position = ball.Position
 		particle.Parent = workspace
 		task.wait(0.01)
-		local attachment =
-			particle:FindFirstChild("Attachment")
+		local attachment = particle:FindFirstChild("Attachment")
 		if attachment then
-			local mul = 4/(overcharge and 5 or 4)
-			if throwCharge >= 1*mul then
-				local smoke =
-					attachment:FindFirstChild("Smoke3")
-				local circle =
-					attachment:FindFirstChild("Circle3")
-				local fx =
-					attachment:FindFirstChild("FX3")
+			local mul = 4 / (overcharge and 5 or 4)
+			if throwCharge >= 1 * mul then
+				local smoke = attachment:FindFirstChild("Smoke3")
+				local circle = attachment:FindFirstChild("Circle3")
+				local fx = attachment:FindFirstChild("FX3")
 				if smoke then
 					smoke:Emit(10)
 				end
@@ -751,11 +610,9 @@ local function throwBall(player, val1, ve)
 				if fx then
 					fx:Emit(2)
 				end
-			elseif throwCharge >= 0.5*mul then
-				local smoke =
-					attachment:FindFirstChild("Smoke2")
-				local circle =
-					attachment:FindFirstChild("Circle2")
+			elseif throwCharge >= 0.5 * mul then
+				local smoke = attachment:FindFirstChild("Smoke2")
+				local circle = attachment:FindFirstChild("Circle2")
 				if smoke then
 					smoke:Emit(10)
 				end
@@ -763,10 +620,8 @@ local function throwBall(player, val1, ve)
 					circle:Emit(2)
 				end
 			else
-				local smoke =
-					attachment:FindFirstChild("Smoke")
-				local circle =
-					attachment:FindFirstChild("Circle")
+				local smoke = attachment:FindFirstChild("Smoke")
+				local circle = attachment:FindFirstChild("Circle")
 				if smoke then
 					smoke:Emit(10)
 				end
@@ -779,8 +634,7 @@ local function throwBall(player, val1, ve)
 	end
 	ball.Boing:Play()
 	removeAllChargeFire(ball)
-	local throwable =
-		ball:FindFirstChild("Throwable")
+	local throwable = ball:FindFirstChild("Throwable")
 	if throwable then
 		throwable.Value = true
 	end
@@ -789,34 +643,41 @@ local function throwBall(player, val1, ve)
 	end
 	debris:AddItem(hit, 2)
 end
+-- Remote input is validated by health, character ownership, and current held-ball state before pickup, charge, or throw actions run.
 remote.OnServerEvent:Connect(function(player, val1, ve)
 	if humanoid.Health <= 0 then
 		return
 	end
+
 	if player.Character ~= character then
 		return
 	end
+
 	if player.Name ~= character.Name then
 		return
 	end
+
 	if ve == 1 then
 		if getHeldBall() then
 			return
 		end
-		local arm = character:FindFirstChild("Right Arm")
-			or character:FindFirstChild("RightHand")
+
+		local arm = character:FindFirstChild("Right Arm") or character:FindFirstChild("RightHand")
+
 		if not arm then
 			return
 		end
+
 		local range = 10
 		local nearestBall = nil
+
 		for _, ball in ipairs(ballsFolder:GetChildren()) do
 			if ball:IsA("BasePart") then
-				local throwable =
-					ball:FindFirstChild("Throwable")
+				local throwable = ball:FindFirstChild("Throwable")
+
 				if throwable and throwable.Value then
-					local distance =
-						(ball.Position - arm.Position).Magnitude
+					local distance = (ball.Position - arm.Position).Magnitude
+
 					if distance < range then
 						nearestBall = ball
 						range = distance
@@ -824,34 +685,44 @@ remote.OnServerEvent:Connect(function(player, val1, ve)
 				end
 			end
 		end
+
 		if nearestBall then
 			resetCharging(player, false)
 			removeAllChargeFire(nearestBall)
+
 			nearestBall.Anchored = false
 			nearestBall.CanCollide = false
 			nearestBall.CanTouch = false
+
 			grab:Play()
 			hold:Play()
+
 			nearestBall.Parent = character
-			local throwable =
-				nearestBall:FindFirstChild("Throwable")
+
+			local throwable = nearestBall:FindFirstChild("Throwable")
+
 			if throwable then
 				throwable.Value = false
 			end
-			nearestBall.CFrame = CFrame.new(
-				arm.Position - arm.CFrame.UpVector
-			)
+
+			nearestBall.CFrame = CFrame.new(arm.Position - arm.CFrame.UpVector)
+
 			local ballWeld = Instance.new("WeldConstraint")
 			ballWeld.Name = "BallWeld"
 			ballWeld.Part0 = nearestBall
 			ballWeld.Part1 = arm
 			ballWeld.Parent = nearestBall
-			applyBallSkin.applyBallSkin(nearestBall, replicatedStorage.shopItems.skins:FindFirstChild(player.stats.skin.Value))
+
+			applyBallSkin.applyBallSkin(
+				nearestBall,
+				replicatedStorage.shopItems.skins:FindFirstChild(player.stats.skin.Value)
+			)
 		end
 	elseif ve == 2 then
 		if charging then
 			return
 		end
+
 		if not beginCharging(player) then
 			queueChargeUntilBallIsHeld(player)
 		end
@@ -861,6 +732,7 @@ remote.OnServerEvent:Connect(function(player, val1, ve)
 		end
 	end
 end)
+
 for _, object in ipairs(character:GetDescendants()) do
 	if object:IsA("BasePart") then
 		object.CollisionGroup = "Player"
@@ -872,6 +744,8 @@ for _, object in ipairs(character:GetDescendants()) do
 		end
 	end
 end
+-- Heartbeat advances charge using deltaTime, keeping charge speed independent of frame rate.
+-- It also manages overcharge vulnerability, movement slowdown, charge effects, and automatic overcharge release.
 runService.Heartbeat:Connect(function(deltaTime)
 	if overchargeStarted then
 		character:SetAttribute("vulnerable", true)
@@ -880,75 +754,77 @@ runService.Heartbeat:Connect(function(deltaTime)
 		character:SetAttribute("vulnerable", false)
 		humanoid.JumpPower = 50
 	end
+
 	if chargeSlowdown > 0 then
 		chargeSlowdown -= deltaTime
 		speedTag.Value = -10
 	elseif charging then
-		speedTag.Value = overcharge and (holdCharge >= 1 and -100 or -holdCharge*18) or -holdCharge*12
+		speedTag.Value = overcharge and (holdCharge >= 1 and -100 or -holdCharge * 18) or -holdCharge * 12
 	else
 		speedTag.Value = 0
 	end
+
 	if not charging then
 		return
 	end
+
 	local ball = getHeldBall()
 	local player = getOwner()
+
 	if not ball or not player then
 		resetCharging(player, true)
 		return
 	end
-		sendMeter(player, "Update", 1)
-		return
-	end
+
 	local heldTime = os.clock() - chargeStartedAt
+
 	if heldTime < chargeDelay then
 		return
 	end
-	holdCharge = math.clamp(
-		holdCharge + deltaTime / chargeTime,
-		0,
-		1
-	)
+
+	holdCharge = math.clamp(holdCharge + deltaTime / chargeTime, 0, 1)
+
 	local currentTime = os.clock()
-	if currentTime - lastMeterUpdate
-		>= meterUpdateRate then
+
+	if currentTime - lastMeterUpdate >= meterUpdateRate then
 		lastMeterUpdate = currentTime
-		sendMeter(
-			player,
-			"Update",
-			holdCharge
-		)
+		sendMeter(player, "Update", holdCharge)
 	end
-	if overcharge then
-		if holdCharge >= 1 then
-			if not overchargeStarted then
-				overchargeStarted = true
-				overchargeTimer = time()
-				overchargeAnim:Play()
-			else
-				if character:GetAttribute("cancel") then
-					overchargeStarted = false
-					overchargeAnim:Stop()
-					overchargeTimer = 0
-					releaseBall()
-					character:SetAttribute("cancel", false)
+
+	if overcharge and holdCharge >= 1 then
+		if not overchargeStarted then
+			overchargeStarted = true
+			overchargeTimer = time()
+			overchargeAnim:Play()
+		else
+			if character:GetAttribute("cancel") then
+				overchargeStarted = false
+				overchargeAnim:Stop()
+				overchargeTimer = 0
+				releaseBall()
+				character:SetAttribute("cancel", false)
+			end
+
+			if time() - overchargeTimer >= 1.7 then
+				local mouseLook = getMouse:InvokeClient(plr)
+
+				if mouseLook then
+					throwBall(plr, mouseLook, 3)
 				end
-				if time() - overchargeTimer >= 1.7 then
-					local mouseLook = getMouse:InvokeClient(plr)
-					if mouseLook then
-						throwBall(plr, mouseLook, 3)
-					end
-					overchargeStarted = false
-				end
+
+				overchargeStarted = false
 			end
 		end
 	end
-	local mul = 4/(overcharge and 5 or 4)
-	if holdCharge >= 0.5*mul and not redFireAdded then
+
+	local mul = 4 / (overcharge and 5 or 4)
+
+	if holdCharge >= 0.5 * mul and not redFireAdded then
 		redFireAdded = true
 		addRedFire(ball)
 	end
-	if holdCharge >= 1*mul and not blueFireAdded then
+
+	if holdCharge >= 1 * mul and not blueFireAdded then
 		blueFireAdded = true
 		addBlueFire(ball)
 	end
